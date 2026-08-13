@@ -5,7 +5,7 @@
         android:allowBackup="true"
         android:label="Galaxy Game"
         android:theme="@style/Theme.GalaxyGame"
-        android:icon="@android:drawable/ic_menu_compass">
+        android:icon="@drawable/galaxygameicon512">
 
         <activity
             android:name=".MainActivity"
