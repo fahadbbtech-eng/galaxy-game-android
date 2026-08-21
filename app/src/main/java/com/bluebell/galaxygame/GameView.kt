@@ -62,6 +62,12 @@ import kotlin.random.Random
  *             for explosions, blue-white for the plane getting hit),
  *             which is what actually makes the sound from stage 7 feel
  *             connected to something happening on screen.
+ *   Stage 10 - POWER-UPS. A glowing gold star spawns and falls every time
+ *              your score crosses another 300-point milestone. Flying
+ *              into it (no shooting needed) grants Rapid Fire for about
+ *              8 seconds -- the auto-fire timer from stage 4 fires twice
+ *              as often while it's active, shown by a countdown chip and
+ *              a gold outline around the plane.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
@@ -174,6 +180,19 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
     }
 
+    // --- Power-ups (stage 10) ---
+    // A pickup spawns every time score crosses another multiple of
+    // pointsPerPowerUp. It falls like an obstacle but is harmless --
+    // flying into it (or shooting it) collects it, no dodging needed.
+    data class PowerUp(var x: Float, var y: Float)
+    private val powerUps = mutableListOf<PowerUp>()
+    private val pointsPerPowerUp = 300
+    private var nextPowerUpScore = pointsPerPowerUp
+    private val powerUpSize = 44f
+    private val powerUpSpeed = 9f
+    private var rapidFireFramesRemaining = 0
+    private val rapidFireDurationFrames = 480 // ~8 seconds at 60fps
+
     private var score = 0
     private var gameOver = false
     private var initialized = false
@@ -198,6 +217,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private val soundHit = soundPool.load(context, R.raw.hit, 1)
     private val soundPoint = soundPool.load(context, R.raw.point, 1)
     private val soundGameOver = soundPool.load(context, R.raw.gameover, 1)
+    private val soundPowerUp = soundPool.load(context, R.raw.powerup, 1)
 
     init {
         holder.addCallback(this)
@@ -299,6 +319,18 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         // above zero the plane can't be hit again and flashes in draw().
         if (invincibleFrames > 0) invincibleFrames--
 
+        // Count down rapid fire, granted by collecting a power-up below.
+        if (rapidFireFramesRemaining > 0) rapidFireFramesRemaining--
+
+        // Spawn a power-up every time score crosses another 300-point
+        // milestone. A while loop (not if) so a big multi-kill frame that
+        // jumps past more than one milestone still spawns each of them.
+        while (score >= nextPowerUpScore) {
+            val x = Random.nextFloat() * (width - powerUpSize).coerceAtLeast(1f)
+            powerUps.add(PowerUp(x, -powerUpSize))
+            nextPowerUpScore += pointsPerPowerUp
+        }
+
         // Ease the plane toward wherever the finger currently is. This is
         // the "joystick feel": planeX/planeY chase targetX/targetY a
         // fraction of the remaining distance every frame.
@@ -349,12 +381,44 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
         // Auto-fire: while the plane is on screen, it fires straight up on
         // a timer. No separate tap needed, since the one finger you have
-        // is already busy steering (stage 2's joystick drag).
+        // is already busy steering (stage 2's joystick drag). Rapid Fire
+        // (stage 10) halves the interval, so it fires twice as often.
+        val currentFireInterval = if (rapidFireFramesRemaining > 0) fireIntervalFrames / 2 else fireIntervalFrames
         framesSinceLastShot++
-        if (framesSinceLastShot >= fireIntervalFrames) {
+        if (framesSinceLastShot >= currentFireInterval) {
             framesSinceLastShot = 0
             bullets.add(Bullet(planeX, planeY - planeSize / 2))
             soundPool.play(soundShoot, 0.5f, 0.5f, 0, 0, 1f)
+        }
+
+        // Power-ups fall straight down; flying into one collects it
+        // immediately (unlike obstacles, there's nothing to dodge here).
+        val planeRectForPowerUps = RectF(
+            planeX - planeSize / 2, planeY - planeSize / 2,
+            planeX + planeSize / 2, planeY + planeSize / 2
+        )
+        val powerUpIterator = powerUps.iterator()
+        while (powerUpIterator.hasNext()) {
+            val powerUp = powerUpIterator.next()
+            powerUp.y += powerUpSpeed
+
+            val powerUpRect = RectF(
+                powerUp.x, powerUp.y,
+                powerUp.x + powerUpSize, powerUp.y + powerUpSize
+            )
+            if (RectF.intersects(planeRectForPowerUps, powerUpRect)) {
+                rapidFireFramesRemaining = rapidFireDurationFrames
+                soundPool.play(soundPowerUp, 0.7f, 0.7f, 0, 0, 1f)
+                spawnBurst(
+                    powerUp.x + powerUpSize / 2, powerUp.y + powerUpSize / 2,
+                    Color.rgb(255, 220, 90), count = 16, maxLife = 24
+                )
+                powerUpIterator.remove()
+                continue
+            }
+            if (powerUp.y > height) {
+                powerUpIterator.remove()
+            }
         }
 
         // Move bullets upward and drop any that fly off the top of the screen.
@@ -476,6 +540,12 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         canvas.drawText("Score: $score", 40f, 100f, paint)
         paint.textSize = 40f
         canvas.drawText("Lives: " + "♥".repeat(lives.coerceAtLeast(0)), 40f, 155f, paint)
+        if (rapidFireFramesRemaining > 0) {
+            paint.color = Color.rgb(255, 220, 90)
+            paint.textSize = 40f
+            val secondsLeft = (rapidFireFramesRemaining / 60) + 1
+            canvas.drawText("RAPID FIRE ${secondsLeft}s", 40f, 200f, paint)
+        }
 
         // Asteroids/enemies -- color signals the type so the variety is
         // actually readable at a glance, not just different under the hood.
@@ -517,6 +587,28 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             canvas.drawCircle(particle.x, particle.y, 5f, paint)
         }
 
+        // Power-ups -- a glowing gold star (drawn as a simple 4-point
+        // sparkle so it reads as "special" against the round obstacles).
+        paint.color = Color.rgb(255, 220, 90)
+        for (powerUp in powerUps) {
+            val cx = powerUp.x + powerUpSize / 2
+            val cy = powerUp.y + powerUpSize / 2
+            val r = powerUpSize / 2
+            canvas.drawCircle(cx, cy, r * 0.4f, paint)
+            val star = Path().apply {
+                moveTo(cx, cy - r)
+                lineTo(cx + r * 0.18f, cy - r * 0.18f)
+                lineTo(cx + r, cy)
+                lineTo(cx + r * 0.18f, cy + r * 0.18f)
+                lineTo(cx, cy + r)
+                lineTo(cx - r * 0.18f, cy + r * 0.18f)
+                lineTo(cx - r, cy)
+                lineTo(cx - r * 0.18f, cy - r * 0.18f)
+                close()
+            }
+            canvas.drawPath(star, paint)
+        }
+
         // Bullets -- small glowing yellow slivers fired from the nose.
         paint.color = Color.rgb(255, 235, 120)
         for (bullet in bullets) {
@@ -532,7 +624,6 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         // invincible it flashes by skipping every other frame's draw.
         val flashingHidden = invincibleFrames > 0 && (invincibleFrames / 4) % 2 == 0
         if (initialized && !flashingHidden) {
-            paint.color = Color.rgb(90, 200, 230)
             val path = Path().apply {
                 moveTo(planeX, planeY - planeSize / 2)                 // nose
                 lineTo(planeX - planeSize / 2, planeY + planeSize / 2) // left wing
@@ -540,6 +631,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 lineTo(planeX + planeSize / 2, planeY + planeSize / 2) // right wing
                 close()
             }
+            // Rapid Fire active -- draw a glowing gold outline behind the
+            // plane before filling it in, so the boost reads instantly.
+            if (rapidFireFramesRemaining > 0) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 8f
+                paint.color = Color.rgb(255, 220, 90)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+            }
+            paint.color = Color.rgb(90, 200, 230)
             canvas.drawPath(path, paint)
         }
 
@@ -565,6 +666,9 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 obstacles.clear()
                 bullets.clear()
                 particles.clear()
+                powerUps.clear()
+                nextPowerUpScore = pointsPerPowerUp
+                rapidFireFramesRemaining = 0
                 framesSinceLastShot = 0
                 lives = startingLives
                 invincibleFrames = 0
