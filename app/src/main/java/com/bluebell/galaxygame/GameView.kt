@@ -6,9 +6,12 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.media.AudioAttributes
+import android.media.SoundPool
 import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import kotlin.math.sin
 import kotlin.random.Random
 
 /**
@@ -41,13 +44,25 @@ import kotlin.random.Random
  *             fast. Now both scale up smoothly the longer you survive:
  *             obstacles spawn more often and fall faster over time, up
  *             to a capped maximum so it never becomes unfair/impossible.
+ *   Stage 7 - SOUND. Five short effects (shoot, explosion, hit, dodge
+ *             "point", game over), synthesized as plain WAV files rather
+ *             than pulled from anywhere external, played through a
+ *             SoundPool so several can overlap without cutting each
+ *             other off (e.g. a shot and an explosion at the same time).
+ *   Stage 8 - ENEMY VARIETY. Obstacles used to be one shape that always
+ *             fell straight down. Now there are three kinds: the plain
+ *             asteroid from before, a DRIFTER that weaves side to side
+ *             as it falls (needs real dodging, not just watching one
+ *             axis), and a tougher TANK that takes two bullet hits to
+ *             destroy instead of one. Which kinds can spawn widens as
+ *             difficulty increases, so early runs stay simple.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
  * the control scheme and the visual theme (starfield + plane +
  * asteroids instead of paddle + blocks) have changed so far.
  *
- * Later stages (not yet added): enemy variety/patterns, particle effects.
+ * Later stages (not yet added): particle effects.
  * ============================================================
  */
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
@@ -70,9 +85,23 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private val easing = 0.18f // higher = snappier, lower = floatier
 
     // --- Falling obstacles (asteroids / enemies) ---
-    data class Obstacle(var x: Float, var y: Float, val size: Float, var speed: Float)
+    // Stage 8: three kinds instead of one plain shape.
+    //  ASTEROID - the original: straight down, one bullet hit to destroy.
+    //  DRIFTER   - weaves side to side while falling (real 2D dodging).
+    //  TANK      - bigger and tougher, needs two bullet hits.
+    enum class ObstacleType { ASTEROID, DRIFTER, TANK }
+    data class Obstacle(
+        var x: Float,
+        var y: Float,
+        val size: Float,
+        var speed: Float,
+        val type: ObstacleType,
+        var hitsRemaining: Int,
+        var driftPhase: Float = 0f
+    )
     private val obstacles = mutableListOf<Obstacle>()
     private var framesSinceLastObstacle = 0
+    private val driftAmplitude = 3.5f
 
     // --- Bullets (stage 4: auto-fire) ---
     data class Bullet(var x: Float, var y: Float)
@@ -115,6 +144,25 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
 
     private val paint = Paint().apply { isAntiAlias = true }
 
+    // --- Sound (stage 7) ---
+    // A SoundPool (rather than MediaPlayer) is the right tool here because
+    // it lets several short effects overlap -- e.g. a shot and an
+    // explosion landing in the same frame don't cut each other off.
+    private val soundPool: SoundPool = SoundPool.Builder()
+        .setMaxStreams(6)
+        .setAudioAttributes(
+            AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_GAME)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build()
+        )
+        .build()
+    private val soundShoot = soundPool.load(context, R.raw.shoot, 1)
+    private val soundExplosion = soundPool.load(context, R.raw.explosion, 1)
+    private val soundHit = soundPool.load(context, R.raw.hit, 1)
+    private val soundPoint = soundPool.load(context, R.raw.point, 1)
+    private val soundGameOver = soundPool.load(context, R.raw.gameover, 1)
+
     init {
         holder.addCallback(this)
     }
@@ -132,6 +180,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         isPlaying = false
         gameThread?.join()
+        soundPool.release()
     }
 
     override fun run() {
@@ -228,10 +277,27 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         framesSinceLastObstacle++
         if (framesSinceLastObstacle > spawnIntervalFrames) {
             framesSinceLastObstacle = 0
-            val size = Random.nextInt(50, 100).toFloat()
+
+            // Which enemy kinds can spawn widens as difficulty climbs, so
+            // early runs only see the plain asteroid. Drifters unlock
+            // fairly early (they're not harder, just need real dodging);
+            // tanks only start appearing once things have ramped up some.
+            val roll = Random.nextFloat()
+            val type = when {
+                difficulty > 0.35f && roll < 0.15f -> ObstacleType.TANK
+                difficulty > 0.1f && roll < 0.45f -> ObstacleType.DRIFTER
+                else -> ObstacleType.ASTEROID
+            }
+
+            val size = if (type == ObstacleType.TANK) {
+                Random.nextInt(90, 130).toFloat()
+            } else {
+                Random.nextInt(50, 100).toFloat()
+            }
             val x = Random.nextFloat() * (width - size).coerceAtLeast(1f)
             val speed = Random.nextInt(speedMin, speedMax + 1).toFloat()
-            obstacles.add(Obstacle(x, -size, size, speed))
+            val hits = if (type == ObstacleType.TANK) 2 else 1
+            obstacles.add(Obstacle(x, -size, size, speed, type, hits, driftPhase = Random.nextFloat() * 6.28f))
         }
 
         // Auto-fire: while the plane is on screen, it fires straight up on
@@ -241,6 +307,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         if (framesSinceLastShot >= fireIntervalFrames) {
             framesSinceLastShot = 0
             bullets.add(Bullet(planeX, planeY - planeSize / 2))
+            soundPool.play(soundShoot, 0.5f, 0.5f, 0, 0, 1f)
         }
 
         // Move bullets upward and drop any that fly off the top of the screen.
@@ -263,15 +330,24 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             val obstacle = obstacleIterator.next()
             obstacle.y += obstacle.speed
 
+            // Drifters weave side to side as they fall -- a horizontal
+            // sine wave layered on top of the normal straight-down fall.
+            if (obstacle.type == ObstacleType.DRIFTER) {
+                obstacle.driftPhase += 0.06f
+                obstacle.x += sin(obstacle.driftPhase) * driftAmplitude
+                obstacle.x = obstacle.x.coerceIn(0f, (width - obstacle.size).coerceAtLeast(0f))
+            }
+
             val obstacleRect = RectF(
                 obstacle.x, obstacle.y,
                 obstacle.x + obstacle.size, obstacle.y + obstacle.size
             )
 
-            // Check every live bullet against this obstacle. A hit destroys
-            // both the bullet and the obstacle and awards bonus score, on
-            // top of the point you'd already get for dodging it.
-            var destroyedByBullet = false
+            // Check every live bullet against this obstacle. A hit removes
+            // the bullet and chips one hit point off the obstacle; only
+            // once hitsRemaining reaches zero does it actually get
+            // destroyed and award bonus score (tanks take two hits).
+            var hitByBullet = false
             val hitBulletIterator = bullets.iterator()
             while (hitBulletIterator.hasNext()) {
                 val bullet = hitBulletIterator.next()
@@ -281,20 +357,30 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 )
                 if (RectF.intersects(bulletRect, obstacleRect)) {
                     hitBulletIterator.remove()
-                    destroyedByBullet = true
+                    hitByBullet = true
                     break
                 }
             }
-            if (destroyedByBullet) {
-                obstacleIterator.remove()
-                score += bulletScore
+            if (hitByBullet) {
+                obstacle.hitsRemaining--
+                if (obstacle.hitsRemaining <= 0) {
+                    obstacleIterator.remove()
+                    score += bulletScore
+                    soundPool.play(soundExplosion, 0.7f, 0.7f, 0, 0, 1f)
+                } else {
+                    // Tank took a hit but survived -- a lighter thud so it's
+                    // clearly different from the full explosion sound.
+                    soundPool.play(soundExplosion, 0.3f, 0.3f, 0, 0, 1.3f)
+                }
                 continue
             }
 
             if (invincibleFrames <= 0 && RectF.intersects(planeRect, obstacleRect)) {
                 lives--
+                soundPool.play(soundHit, 0.8f, 0.8f, 0, 0, 1f)
                 if (lives <= 0) {
                     gameOver = true
+                    soundPool.play(soundGameOver, 0.8f, 0.8f, 0, 0, 1f)
                 } else {
                     // Invincibility alone (checked above) stops any further
                     // life loss for the next couple seconds, so there's no
@@ -309,6 +395,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             if (obstacle.y > height) {
                 obstacleIterator.remove()
                 score++
+                soundPool.play(soundPoint, 0.4f, 0.4f, 0, 0, 1f)
             }
         }
     }
@@ -338,14 +425,32 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         paint.textSize = 40f
         canvas.drawText("Lives: " + "♥".repeat(lives.coerceAtLeast(0)), 40f, 155f, paint)
 
-        // Asteroids/enemies.
-        paint.color = Color.rgb(200, 90, 70)
+        // Asteroids/enemies -- color signals the type so the variety is
+        // actually readable at a glance, not just different under the hood.
         for (obstacle in obstacles) {
+            paint.color = when (obstacle.type) {
+                ObstacleType.ASTEROID -> Color.rgb(200, 90, 70)  // rust red, as before
+                ObstacleType.DRIFTER -> Color.rgb(210, 130, 230) // violet
+                ObstacleType.TANK -> Color.rgb(140, 150, 160)    // gunmetal grey
+            }
             canvas.drawOval(
                 obstacle.x, obstacle.y,
                 obstacle.x + obstacle.size, obstacle.y + obstacle.size,
                 paint
             )
+            // Tanks show a thin ring once they've taken their first hit,
+            // so it's visible that the next shot will actually kill it.
+            if (obstacle.type == ObstacleType.TANK && obstacle.hitsRemaining == 1) {
+                paint.style = Paint.Style.STROKE
+                paint.strokeWidth = 4f
+                paint.color = Color.rgb(255, 235, 120)
+                canvas.drawOval(
+                    obstacle.x + 6f, obstacle.y + 6f,
+                    obstacle.x + obstacle.size - 6f, obstacle.y + obstacle.size - 6f,
+                    paint
+                )
+                paint.style = Paint.Style.FILL
+            }
         }
 
         // Bullets -- small glowing yellow slivers fired from the nose.
