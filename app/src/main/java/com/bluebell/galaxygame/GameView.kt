@@ -13,7 +13,7 @@ import kotlin.random.Random
 
 /**
  * ============================================================
- * STAGE 1 + 2 + 3 + 4 of the "Galaxy Game" plan:
+ * STAGE 1 + 2 + 3 + 4 + 5 + 6 of the "Galaxy Game" plan:
  *   Stage 1 - forked from Dodge Game (same loop/thread/surface setup).
  *   Stage 2 - swapped the paddle's left/right-only drag for a full
  *             2D "joystick" style: the plane follows your finger
@@ -36,14 +36,18 @@ import kotlin.random.Random
  *             the very next frame, and gives you a couple seconds of
  *             flashing invincibility to recover. Game over only happens
  *             once all lives are gone.
+ *   Stage 6 - DIFFICULTY RAMP. Obstacles used to spawn at one constant
+ *             rate and speed range for the whole run, which gets stale
+ *             fast. Now both scale up smoothly the longer you survive:
+ *             obstacles spawn more often and fall faster over time, up
+ *             to a capped maximum so it never becomes unfair/impossible.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
  * the control scheme and the visual theme (starfield + plane +
  * asteroids instead of paddle + blocks) have changed so far.
  *
- * Later stages (not yet added): enemy variety/patterns, difficulty
- * ramp, particle effects.
+ * Later stages (not yet added): enemy variety/patterns, particle effects.
  * ============================================================
  */
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
@@ -93,6 +97,17 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private var lives = startingLives
     private var invincibleFrames = 0
     private val invincibilityDurationFrames = 120 // ~2 seconds at 60fps
+
+    // --- Difficulty ramp (stage 6) ---
+    // framesSurvived counts up every frame the run is alive; difficulty
+    // is derived from it so obstacles spawn faster and fall quicker the
+    // longer you last, capped so it never becomes unfair.
+    private var framesSurvived = 0
+    private val rampDurationFrames = 3600 // ~60 seconds to reach max difficulty
+    private val baseSpawnIntervalFrames = 35
+    private val minSpawnIntervalFrames = 14
+    private val baseSpeedRange = 12..24
+    private val maxSpeedRange = 22..40
 
     private var score = 0
     private var gameOver = false
@@ -198,13 +213,24 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             planeY = planeY.coerceIn(planeSize, (height - planeSize).coerceAtLeast(planeSize))
         }
 
-        // Spawn a new obstacle every ~35 frames (a bit faster than Dodge Game).
+        // Difficulty ramps up smoothly from 0 (run just started) to 1
+        // (max difficulty) over rampDurationFrames, then holds at 1.
+        framesSurvived++
+        val difficulty = (framesSurvived.toFloat() / rampDurationFrames).coerceIn(0f, 1f)
+
+        // Spawn obstacles faster (shorter interval) and let them fall
+        // quicker (wider/faster speed range) as difficulty climbs.
+        val spawnIntervalFrames = (baseSpawnIntervalFrames -
+            (baseSpawnIntervalFrames - minSpawnIntervalFrames) * difficulty).toInt()
+        val speedMin = (baseSpeedRange.first + (maxSpeedRange.first - baseSpeedRange.first) * difficulty).toInt()
+        val speedMax = (baseSpeedRange.last + (maxSpeedRange.last - baseSpeedRange.last) * difficulty).toInt()
+
         framesSinceLastObstacle++
-        if (framesSinceLastObstacle > 35) {
+        if (framesSinceLastObstacle > spawnIntervalFrames) {
             framesSinceLastObstacle = 0
             val size = Random.nextInt(50, 100).toFloat()
             val x = Random.nextFloat() * (width - size).coerceAtLeast(1f)
-            val speed = Random.nextInt(12, 24).toFloat()
+            val speed = Random.nextInt(speedMin, speedMax + 1).toFloat()
             obstacles.add(Obstacle(x, -size, size, speed))
         }
 
@@ -372,6 +398,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 framesSinceLastShot = 0
                 lives = startingLives
                 invincibleFrames = 0
+                framesSurvived = 0
                 score = 0
                 gameOver = false
                 planeX = width / 2f
