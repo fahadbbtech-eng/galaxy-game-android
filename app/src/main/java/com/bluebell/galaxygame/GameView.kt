@@ -30,14 +30,20 @@ import kotlin.random.Random
  *             up on a timer. Bullets that hit an obstacle destroy it and
  *             award bonus score, on top of the score you already get for
  *             successfully dodging obstacles that fall past you.
+ *   Stage 5 - LIVES. One hit used to end the run instantly (like Dodge
+ *             Game). Now the plane has 3 lives: getting hit costs one
+ *             life, clears nearby obstacles so you're not hit again on
+ *             the very next frame, and gives you a couple seconds of
+ *             flashing invincibility to recover. Game over only happens
+ *             once all lives are gone.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
  * the control scheme and the visual theme (starfield + plane +
  * asteroids instead of paddle + blocks) have changed so far.
  *
- * Later stages (not yet added): enemy variety/patterns, lives,
- * difficulty ramp, particle effects.
+ * Later stages (not yet added): enemy variety/patterns, difficulty
+ * ramp, particle effects.
  * ============================================================
  */
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
@@ -81,6 +87,12 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     data class Star(var x: Float, var y: Float, val size: Float, var speed: Float, val brightness: Int)
     private val farStars = mutableListOf<Star>()
     private val nearStars = mutableListOf<Star>()
+
+    // --- Lives (stage 5) ---
+    private val startingLives = 3
+    private var lives = startingLives
+    private var invincibleFrames = 0
+    private val invincibilityDurationFrames = 120 // ~2 seconds at 60fps
 
     private var score = 0
     private var gameOver = false
@@ -172,6 +184,10 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             }
         }
 
+        // Count down invincibility after getting hit -- while this is
+        // above zero the plane can't be hit again and flashes in draw().
+        if (invincibleFrames > 0) invincibleFrames--
+
         // Ease the plane toward wherever the finger currently is. This is
         // the "joystick feel": planeX/planeY chase targetX/targetY a
         // fraction of the remaining distance every frame.
@@ -249,8 +265,19 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 continue
             }
 
-            if (RectF.intersects(planeRect, obstacleRect)) {
-                gameOver = true
+            if (invincibleFrames <= 0 && RectF.intersects(planeRect, obstacleRect)) {
+                lives--
+                if (lives <= 0) {
+                    gameOver = true
+                } else {
+                    // Invincibility alone (checked above) stops any further
+                    // life loss for the next couple seconds, so there's no
+                    // need to also clear nearby obstacles -- that would risk
+                    // mutating this list while we're mid-iteration over it.
+                    invincibleFrames = invincibilityDurationFrames
+                }
+                obstacleIterator.remove()
+                continue
             }
 
             if (obstacle.y > height) {
@@ -278,10 +305,12 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             canvas.drawCircle(star.x, star.y, star.size, paint)
         }
 
-        // Score text.
+        // Score and lives text.
         paint.color = Color.WHITE
         paint.textSize = 60f
         canvas.drawText("Score: $score", 40f, 100f, paint)
+        paint.textSize = 40f
+        canvas.drawText("Lives: " + "♥".repeat(lives.coerceAtLeast(0)), 40f, 155f, paint)
 
         // Asteroids/enemies.
         paint.color = Color.rgb(200, 90, 70)
@@ -304,8 +333,10 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         }
 
         // Plane -- a simple triangle pointing up, easy to swap for a
-        // sprite/bitmap later without touching the movement logic.
-        if (initialized) {
+        // sprite/bitmap later without touching the movement logic. While
+        // invincible it flashes by skipping every other frame's draw.
+        val flashingHidden = invincibleFrames > 0 && (invincibleFrames / 4) % 2 == 0
+        if (initialized && !flashingHidden) {
             paint.color = Color.rgb(90, 200, 230)
             val path = Path().apply {
                 moveTo(planeX, planeY - planeSize / 2)                 // nose
@@ -339,6 +370,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 obstacles.clear()
                 bullets.clear()
                 framesSinceLastShot = 0
+                lives = startingLives
+                invincibleFrames = 0
                 score = 0
                 gameOver = false
                 planeX = width / 2f
