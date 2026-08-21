@@ -13,7 +13,7 @@ import kotlin.random.Random
 
 /**
  * ============================================================
- * STAGE 1 + 2 + 3 of the "Galaxy Game" plan:
+ * STAGE 1 + 2 + 3 + 4 of the "Galaxy Game" plan:
  *   Stage 1 - forked from Dodge Game (same loop/thread/surface setup).
  *   Stage 2 - swapped the paddle's left/right-only drag for a full
  *             2D "joystick" style: the plane follows your finger
@@ -24,13 +24,19 @@ import kotlin.random.Random
  *             Alto's Odyssey uses for its background mountains -- two
  *             flat layers scrolling at different speeds read as depth
  *             even though everything is still 2D.
+ *   Stage 4 - SHOOTING. Since your one finger is already busy steering
+ *             the plane (stage 2's joystick drag), shooting is AUTO-FIRE
+ *             rather than a second tap gesture: the plane fires straight
+ *             up on a timer. Bullets that hit an obstacle destroy it and
+ *             award bonus score, on top of the score you already get for
+ *             successfully dodging obstacles that fall past you.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
  * the control scheme and the visual theme (starfield + plane +
  * asteroids instead of paddle + blocks) have changed so far.
  *
- * Later stages (not yet added): shooting, enemy patterns, lives,
+ * Later stages (not yet added): enemy variety/patterns, lives,
  * difficulty ramp, particle effects.
  * ============================================================
  */
@@ -57,6 +63,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     data class Obstacle(var x: Float, var y: Float, val size: Float, var speed: Float)
     private val obstacles = mutableListOf<Obstacle>()
     private var framesSinceLastObstacle = 0
+
+    // --- Bullets (stage 4: auto-fire) ---
+    data class Bullet(var x: Float, var y: Float)
+    private val bullets = mutableListOf<Bullet>()
+    private var framesSinceLastShot = 0
+    private val fireIntervalFrames = 12 // ~5 shots/sec at 60fps
+    private val bulletSpeed = 26f
+    private val bulletWidth = 6f
+    private val bulletHeight = 22f
+    private val bulletScore = 5
 
     // --- Parallax starfield background ---
     // Two layers moving at different speeds create the illusion of depth
@@ -176,14 +192,33 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             obstacles.add(Obstacle(x, -size, size, speed))
         }
 
+        // Auto-fire: while the plane is on screen, it fires straight up on
+        // a timer. No separate tap needed, since the one finger you have
+        // is already busy steering (stage 2's joystick drag).
+        framesSinceLastShot++
+        if (framesSinceLastShot >= fireIntervalFrames) {
+            framesSinceLastShot = 0
+            bullets.add(Bullet(planeX, planeY - planeSize / 2))
+        }
+
+        // Move bullets upward and drop any that fly off the top of the screen.
+        val bulletIterator = bullets.iterator()
+        while (bulletIterator.hasNext()) {
+            val bullet = bulletIterator.next()
+            bullet.y -= bulletSpeed
+            if (bullet.y + bulletHeight < 0) {
+                bulletIterator.remove()
+            }
+        }
+
         val planeRect = RectF(
             planeX - planeSize / 2, planeY - planeSize / 2,
             planeX + planeSize / 2, planeY + planeSize / 2
         )
 
-        val iterator = obstacles.iterator()
-        while (iterator.hasNext()) {
-            val obstacle = iterator.next()
+        val obstacleIterator = obstacles.iterator()
+        while (obstacleIterator.hasNext()) {
+            val obstacle = obstacleIterator.next()
             obstacle.y += obstacle.speed
 
             val obstacleRect = RectF(
@@ -191,12 +226,35 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 obstacle.x + obstacle.size, obstacle.y + obstacle.size
             )
 
+            // Check every live bullet against this obstacle. A hit destroys
+            // both the bullet and the obstacle and awards bonus score, on
+            // top of the point you'd already get for dodging it.
+            var destroyedByBullet = false
+            val hitBulletIterator = bullets.iterator()
+            while (hitBulletIterator.hasNext()) {
+                val bullet = hitBulletIterator.next()
+                val bulletRect = RectF(
+                    bullet.x - bulletWidth / 2, bullet.y,
+                    bullet.x + bulletWidth / 2, bullet.y + bulletHeight
+                )
+                if (RectF.intersects(bulletRect, obstacleRect)) {
+                    hitBulletIterator.remove()
+                    destroyedByBullet = true
+                    break
+                }
+            }
+            if (destroyedByBullet) {
+                obstacleIterator.remove()
+                score += bulletScore
+                continue
+            }
+
             if (RectF.intersects(planeRect, obstacleRect)) {
                 gameOver = true
             }
 
             if (obstacle.y > height) {
-                iterator.remove()
+                obstacleIterator.remove()
                 score++
             }
         }
@@ -235,6 +293,16 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             )
         }
 
+        // Bullets -- small glowing yellow slivers fired from the nose.
+        paint.color = Color.rgb(255, 235, 120)
+        for (bullet in bullets) {
+            canvas.drawRoundRect(
+                bullet.x - bulletWidth / 2, bullet.y,
+                bullet.x + bulletWidth / 2, bullet.y + bulletHeight,
+                bulletWidth / 2, bulletWidth / 2, paint
+            )
+        }
+
         // Plane -- a simple triangle pointing up, easy to swap for a
         // sprite/bitmap later without touching the movement logic.
         if (initialized) {
@@ -269,6 +337,8 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
         if (gameOver) {
             if (event.action == MotionEvent.ACTION_DOWN) {
                 obstacles.clear()
+                bullets.clear()
+                framesSinceLastShot = 0
                 score = 0
                 gameOver = false
                 planeX = width / 2f
