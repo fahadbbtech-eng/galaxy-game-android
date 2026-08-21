@@ -56,13 +56,17 @@ import kotlin.random.Random
  *             axis), and a tougher TANK that takes two bullet hits to
  *             destroy instead of one. Which kinds can spawn widens as
  *             difficulty increases, so early runs stay simple.
+ *   Stage 9 - PARTICLES. Destroying something or getting hit used to be
+ *             silent-looking -- the shape just vanished. Now both spawn
+ *             a small burst of fading debris/spark particles (orange
+ *             for explosions, blue-white for the plane getting hit),
+ *             which is what actually makes the sound from stage 7 feel
+ *             connected to something happening on screen.
  *
  * Everything else (spawn/update/draw loop, collision detection,
  * score, restart-on-tap) is the same shape as Dodge Game -- only
  * the control scheme and the visual theme (starfield + plane +
  * asteroids instead of paddle + blocks) have changed so far.
- *
- * Later stages (not yet added): particle effects.
  * ============================================================
  */
 class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback, Runnable {
@@ -137,6 +141,38 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
     private val minSpawnIntervalFrames = 14
     private val baseSpeedRange = 12..24
     private val maxSpeedRange = 22..40
+
+    // --- Particles (stage 9) ---
+    // Small fading dots flung outward from wherever something just
+    // happened. vx/vy are constant per particle (no gravity needed for
+    // a space setting); life counts down each frame and drives both
+    // removal and the fade-out alpha in draw().
+    data class Particle(
+        var x: Float,
+        var y: Float,
+        var vx: Float,
+        var vy: Float,
+        var life: Int,
+        val maxLife: Int,
+        val color: Int
+    )
+    private val particles = mutableListOf<Particle>()
+
+    private fun spawnBurst(x: Float, y: Float, color: Int, count: Int = 14, maxLife: Int = 26) {
+        repeat(count) {
+            val angle = Random.nextFloat() * 6.28f
+            val speed = Random.nextFloat() * 6f + 2f
+            particles.add(
+                Particle(
+                    x = x, y = y,
+                    vx = kotlin.math.cos(angle) * speed,
+                    vy = kotlin.math.sin(angle) * speed,
+                    life = maxLife, maxLife = maxLife,
+                    color = color
+                )
+            )
+        }
+    }
 
     private var score = 0
     private var gameOver = false
@@ -246,6 +282,17 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 star.y = 0f
                 star.x = Random.nextFloat() * width
             }
+        }
+
+        // Move and age out particles. Removed the moment their life hits
+        // zero; draw() fades their alpha down as life approaches zero.
+        val particleIterator = particles.iterator()
+        while (particleIterator.hasNext()) {
+            val particle = particleIterator.next()
+            particle.x += particle.vx
+            particle.y += particle.vy
+            particle.life--
+            if (particle.life <= 0) particleIterator.remove()
         }
 
         // Count down invincibility after getting hit -- while this is
@@ -362,15 +409,19 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
                 }
             }
             if (hitByBullet) {
+                val obstacleCenterX = obstacle.x + obstacle.size / 2
+                val obstacleCenterY = obstacle.y + obstacle.size / 2
                 obstacle.hitsRemaining--
                 if (obstacle.hitsRemaining <= 0) {
                     obstacleIterator.remove()
                     score += bulletScore
                     soundPool.play(soundExplosion, 0.7f, 0.7f, 0, 0, 1f)
+                    spawnBurst(obstacleCenterX, obstacleCenterY, Color.rgb(255, 150, 60))
                 } else {
-                    // Tank took a hit but survived -- a lighter thud so it's
-                    // clearly different from the full explosion sound.
+                    // Tank took a hit but survived -- a lighter thud and a
+                    // smaller spark burst, clearly less than a full kill.
                     soundPool.play(soundExplosion, 0.3f, 0.3f, 0, 0, 1.3f)
+                    spawnBurst(obstacleCenterX, obstacleCenterY, Color.rgb(255, 210, 120), count = 6, maxLife = 14)
                 }
                 continue
             }
@@ -378,6 +429,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             if (invincibleFrames <= 0 && RectF.intersects(planeRect, obstacleRect)) {
                 lives--
                 soundPool.play(soundHit, 0.8f, 0.8f, 0, 0, 1f)
+                spawnBurst(planeX, planeY, Color.rgb(160, 220, 255), count = 20, maxLife = 30)
                 if (lives <= 0) {
                     gameOver = true
                     soundPool.play(soundGameOver, 0.8f, 0.8f, 0, 0, 1f)
@@ -453,6 +505,18 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             }
         }
 
+        // Particles -- fading debris/sparks from explosions and hits.
+        // Alpha scales down with remaining life so they visibly dissolve
+        // rather than just popping out of existence.
+        for (particle in particles) {
+            val alpha = (255 * (particle.life.toFloat() / particle.maxLife)).toInt().coerceIn(0, 255)
+            paint.color = Color.argb(
+                alpha,
+                Color.red(particle.color), Color.green(particle.color), Color.blue(particle.color)
+            )
+            canvas.drawCircle(particle.x, particle.y, 5f, paint)
+        }
+
         // Bullets -- small glowing yellow slivers fired from the nose.
         paint.color = Color.rgb(255, 235, 120)
         for (bullet in bullets) {
@@ -500,6 +564,7 @@ class GameView(context: Context) : SurfaceView(context), SurfaceHolder.Callback,
             if (event.action == MotionEvent.ACTION_DOWN) {
                 obstacles.clear()
                 bullets.clear()
+                particles.clear()
                 framesSinceLastShot = 0
                 lives = startingLives
                 invincibleFrames = 0
